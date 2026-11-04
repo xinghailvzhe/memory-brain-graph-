@@ -1,0 +1,94 @@
+--- a/assets/index.html
++++ b/assets/index.html
+@@ -12447,6 +12447,91 @@
+ }
+ boot();
+ </script>
+ <script src="./tree.js"></script>
++
++<!-- 工作区开关（本机补丁）：右侧紧凑面板，可收起成小按钮 -->
++<button id="mbgWsMini" title="工作区开关" style="display:none;position:fixed;right:16px;top:150px;height:28px;padding:0 10px;border-radius:8px;background:rgba(10,18,32,.85);border:1px solid rgba(120,170,255,.28);color:#cfe0ff;font-size:12px;cursor:pointer;z-index:51;backdrop-filter:blur(6px);">⚙ 工作区</button>
++<div id="mbgWsPanel" style="position:fixed;right:16px;top:150px;width:232px;padding:10px 12px;border-radius:12px;background:rgba(10,18,32,.78);border:1px solid rgba(120,170,255,.26);box-shadow:0 6px 24px rgba(0,0,0,.35);backdrop-filter:blur(6px);font-size:12px;color:#cfe0ff;z-index:50;">
++  <div id="mbgWsHead" title="点击收起" style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;margin-bottom:8px;">
++    <span style="font-weight:600;letter-spacing:.5px;">工作区开关</span>
++    <span id="mbgWsHint" style="font-size:11px;opacity:.65;margin-left:auto;">…</span>
++    <span id="mbgWsCaret" style="font-size:11px;opacity:.7;">▾</span>
++  </div>
++  <div id="mbgWsBody">
++    <div id="mbgWsList" style="max-height:250px;overflow:auto;display:flex;flex-direction:column;gap:5px;"></div>
++    <div style="margin-top:9px;display:flex;gap:8px;">
++      <button id="mbgWsSave" style="flex:1;height:26px;border-radius:8px;border:1px solid rgba(120,170,255,.35);background:rgba(70,140,255,.18);color:#dceaff;font-size:12px;cursor:pointer;">保存</button>
++      <button id="mbgWsReload" style="height:26px;padding:0 10px;border-radius:8px;border:1px solid rgba(120,170,255,.22);background:transparent;color:#9fb6d9;font-size:12px;cursor:pointer;">保存并刷新</button>
++    </div>
++  </div>
++</div>
++<script>
++(function () {
++  var KEY = 'mbgWsCollapsed';
++  var panel = document.getElementById('mbgWsPanel');
++  var mini = document.getElementById('mbgWsMini');
++  var body = document.getElementById('mbgWsBody');
++  var caret = document.getElementById('mbgWsCaret');
++  var head = document.getElementById('mbgWsHead');
++  var listEl = document.getElementById('mbgWsList');
++  var hint = document.getElementById('mbgWsHint');
++  var items = [];
++
++  function shortName(p) { return p.replace(/\\/g, '/').split('/').filter(Boolean).slice(-2).join('/'); }
++  function render() {
++    listEl.innerHTML = '';
++    items.forEach(function (it, i) {
++      var row = document.createElement('label');
++      row.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 4px;border-radius:6px;' +
++        (it.current ? 'background:rgba(90,200,150,.10);' : '');
++      var cb = document.createElement('input');
++      cb.type = 'checkbox'; cb.checked = !!it.enabled; cb.dataset.i = String(i);
++      cb.style.cssText = 'accent-color:#59d6a2;width:13px;height:13px;flex:none;';
++      var sp = document.createElement('span');
++      sp.textContent = shortName(it.path);
++      sp.title = it.path;
++      sp.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
++        (it.current ? 'color:#9df0c6;' : 'opacity:.9;');
++      row.appendChild(cb); row.appendChild(sp); listEl.appendChild(row);
++    });
++    var on = items.filter(function (x) { return x.enabled; }).length;
++    hint.textContent = on + '/' + items.length + ' 启用';
++  }
++  function load() {
++    fetch('/api/workspaces', { cache: 'no-store' })
++      .then(function (r) { return r.json(); })
++      .then(function (j) { items = j.workspaces || []; render(); })
++      .catch(function () { hint.textContent = '读取失败'; });
++  }
++  function setCollapsed(v) {
++    panel.style.display = v ? 'none' : 'block';
++    mini.style.display = v ? 'block' : 'none';
++    try { localStorage.setItem(KEY, v ? '1' : '0'); } catch (e) { /* 忽略 */ }
++    if (!v) load();
++  }
++  head.onclick = function () { setCollapsed(true); };
++  mini.onclick = function () { setCollapsed(false); };
++  function saveThen(reloadAfter) {
++    var ws = [];
++    listEl.querySelectorAll('input[type=checkbox]').forEach(function (cb) {
++      if (cb.checked) ws.push(items[+cb.dataset.i].path);
++    });
++    fetch('/api/gate', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ workspaces: ws }),
++    }).then(function (r) { return r.json(); }).then(function (j) {
++      hint.textContent = j && j.ok ? ('已保存 ' + ws.length + ' 个') : '保存失败';
++      if (j && j.ok && reloadAfter) load();
++    }).catch(function () { hint.textContent = '保存失败'; });
++  }
++  document.getElementById('mbgWsReload').onclick = function () { saveThen(true); };
++  document.getElementById('mbgWsSave').onclick = function () { saveThen(false); };
++  var collapsed = false;
++  try { collapsed = localStorage.getItem(KEY) === '1'; } catch (e) { /* 忽略 */ }
++  setCollapsed(collapsed);
++  if (!collapsed) load();
++})();
++</script>
+ </body>
+ </html>
