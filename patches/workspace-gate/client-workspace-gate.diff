@@ -1,0 +1,251 @@
+--- a/client.js
++++ b/client.js
+@@ -1,13 +1,15 @@
+ /**
+- * memory-brain-graph —— Client 半边
++ * memory-brain-graph —— Client 半边（v8）
+  *
+- * 两个入口：
+- *   · 输入框右侧「脑图」按钮 → 新标签打开
+- *   · 会话视图「脑图」标签页 → 内嵌 iframe，直接在 DSH 里看
++ * 入口：输入框右侧「脑图」按钮 / 会话视图「脑图」标签页。
++ * 工作区开关：/api/gate 提供启用名单；探针取当前会话 cwd 后决定是否渲染。
+  *
+- * ⚠️ 注册 id 必须等于 loader entry 名（包名），否则 ModuleLoader 会报
+- *    "loaded without registering memory-brain-graph"，整个客户端半边不出现。
++ * v8：名单走 SSE 实时通道（/api/gate/stream），面板里保存/刷新即刻生效，
++ *     不再需要刷新 DSH 页面；15 秒轮询只作保底。
++ * v7：精确匹配（不做父目录前缀匹配）。
++ *
++ * ⚠️ 注册 id 必须等于 loader entry 名（包名）。
+  */
+ 
+ window.__ModuleLoader__.load({
+   id: 'memory-brain-graph',
+@@ -17,52 +19,190 @@
+     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+ 
+     const React = require('react');
+ 
+-    // Host 侧默认端口；改端口的话两边要一起改
+     const PORT = 8787;
+     const URL = 'http://127.0.0.1:' + PORT + '/';
+-
+-    const OpenButton = () => React.createElement('button', {
+-      type: 'button',
+-      title: '记忆脑图（新标签打开）',
+-      onClick: () => {
+-        try { window.open(URL, '_blank', 'noopener'); } catch (e) { /* 忽略 */ }
+-      },
+-      style: {
+-        display: 'inline-flex',
+-        alignItems: 'center',
+-        height: '26px',
+-        padding: '0 9px',
+-        marginLeft: '2px',
+-        fontSize: '12px',
+-        lineHeight: 1,
+-        whiteSpace: 'nowrap',
+-        cursor: 'pointer',
+-        borderRadius: '7px',
+-        color: 'var(--dsw-alias-label-primary)',
+-        background: 'var(--dsw-alias-bg-layer-2)',
+-        border: '1px solid var(--dsw-alias-border-l1)',
+-      },
+-    }, '脑图');
+-
+-    const MapView = () => React.createElement('iframe', {
+-      src: URL,
+-      title: '记忆脑图',
+-      style: {
+-        width: '100%',
+-        height: '100%',
+-        border: '0',
+-        display: 'block',
+-        background: 'transparent',
+-      },
+-    });
++    const GATE_URL = URL + 'api/gate';
++
++    const store = { workspaces: [], cwd: '', sessionId: '' };
++    const listeners = new Set();
++    function emit() { listeners.forEach((fn) => { try { fn(); } catch (e) { /* 忽略 */ } }); }
++
++    function applyGate(list) {
++      if (!Array.isArray(list)) return;
++      const a = JSON.stringify(list);
++      const b = JSON.stringify(store.workspaces);
++      if (a !== b) { store.workspaces = list; emit(); }
++    }
++
++    let gateFetching = false;
++    function fetchGate() {
++      if (gateFetching) return;
++      gateFetching = true;
++      try {
++        fetch(GATE_URL, { cache: 'no-store' })
++          .then((r) => r.json())
++          .then((j) => { if (j) applyGate(j.workspaces); })
++          .catch(() => { /* 拉不到 = 全部显示 */ })
++          .then(() => { gateFetching = false; });
++      } catch (e) { gateFetching = false; }
++    }
++
++    let gateStreamTried = false;
++    function startGateStream() {
++      if (gateStreamTried) return;
++      gateStreamTried = true;
++      try {
++        if (typeof EventSource !== 'function') return;
++        const es = new EventSource(GATE_URL + '/stream');
++        es.onmessage = (ev) => {
++          try { applyGate((JSON.parse(ev.data) || {}).workspaces); } catch (e) { /* 忽略 */ }
++        };
++        es.onerror = () => { /* 断线浏览器自动重连，轮询继续兜底 */ };
++      } catch (e) { /* 忽略 */ }
++    }
++
++    function normalize(p) { return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); }
++
++    function setCwd(cwd, sessionId) {
++      const next = normalize(cwd);
++      if (next === store.cwd && sessionId === store.sessionId) return;
++      store.cwd = next;
++      store.sessionId = sessionId || '';
++      emit();
++    }
++
++    function pickCwdFrom(obj, depth) {
++      if (!obj || typeof obj !== 'object') return '';
++      const d = depth || 0;
++      const cands = [
++        obj.cwd, obj.header && obj.header.cwd,
++        obj.workspace && (obj.workspace.path || obj.workspace.cwd || obj.workspace.root),
++        obj.info && obj.info.cwd,
++        obj.session && obj.session.cwd,
++        obj.project && obj.project.path,
++        obj.meta && obj.meta.cwd,
++      ];
++      for (const c of cands) if (typeof c === 'string' && c) return c;
++      if (d < 2) {
++        for (const k of ['session', 'header', 'info', 'workspace', 'project', 'record', 'rows']) {
++          if (obj[k] && typeof obj[k] === 'object') {
++            const got = pickCwdFrom(obj[k], d + 1);
++            if (got) return got;
++          }
++        }
++      }
++      return '';
++    }
++
++    function ProbeInner(props) {
++      const useSessions = props.useSessions;
++      const current = useSessions((s) => (s ? s.current : undefined));
++      const byId = useSessions((s) => (s ? s.byId : undefined));
++      const ctx = props.__ctx;
++      React.useEffect(() => {
++        const sid = String(props.sessionId || '');
++        const id = sid || String(current || '');
++        let cwd = '';
++        try {
++          if (byId && id && byId[id]) cwd = pickCwdFrom(byId[id]);
++          const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : null;
++          if (!cwd && sessions && typeof sessions.binding === 'function' && id) {
++            cwd = pickCwdFrom(sessions.binding(id));
++          }
++        } catch (e) { /* 忽略 */ }
++        setCwd(cwd, id);
++      }, [props.sessionId, current, byId, ctx]);
++      return null;
++    }
++
++    const Probe = (props) => {
++      if (typeof props.useSessions !== 'function') return null;
++      return React.createElement(ProbeInner, props);
++    };
++
++    function useStore() {
++      const [, setTick] = React.useState(0);
++      React.useEffect(() => {
++        const bump = () => setTick((t) => t + 1);
++        listeners.add(bump);
++        fetchGate();
++        startGateStream();
++        const onFocus = () => fetchGate();
++        window.addEventListener('focus', onFocus);
++        document.addEventListener('visibilitychange', onFocus);
++        const timer = setInterval(fetchGate, 15000);   // 保底轮询
++        return () => {
++          listeners.delete(bump);
++          window.removeEventListener('focus', onFocus);
++          document.removeEventListener('visibilitychange', onFocus);
++          clearInterval(timer);
++        };
++      }, []);
++      return store;
++    }
++
++    function allowedNow() {
++      const list = store.workspaces;
++      if (!list.length) return true;
++      if (!store.cwd) return true;
++      return list.some((w) => {
++        const nw = normalize(w);
++        return nw && store.cwd === nw;   // 精确匹配
++      });
++    }
++
++    const OpenButton = () => {
++      useStore();
++      if (!allowedNow()) return null;
++      return React.createElement('button', {
++        type: 'button',
++        title: '记忆脑图 v8 · cwd=' + (store.cwd || '?'),
++        onClick: () => {
++          try { window.open(URL, '_blank', 'noopener'); } catch (e) { /* 忽略 */ }
++        },
++        style: {
++          display: 'inline-flex', alignItems: 'center', height: '26px',
++          padding: '0 9px', marginLeft: '2px', fontSize: '12px', lineHeight: 1,
++          whiteSpace: 'nowrap', cursor: 'pointer', borderRadius: '7px',
++          color: 'var(--dsw-alias-label-primary)',
++          background: 'var(--dsw-alias-bg-layer-2)',
++          border: '1px solid var(--dsw-alias-border-l1)',
++        },
++      }, '脑图');
++    };
++
++    const MapView = () => {
++      useStore();
++      if (!allowedNow()) {
++        return React.createElement('div', {
++          style: {
++            display: 'flex', alignItems: 'center', justifyContent: 'center',
++            width: '100%', height: '100%', color: 'var(--dsw-alias-label-tertiary)',
++            fontSize: '13px',
++          },
++        }, '当前工作区未启用记忆脑图（在脑图页右侧「工作区开关」里勾选并保存）');
++      }
++      return React.createElement('iframe', {
++        src: URL,
++        title: '记忆脑图',
++        style: { width: '100%', height: '100%', border: '0', display: 'block', background: 'transparent' },
++      });
++    };
+ 
+     const inject = ['slots'];
+ 
+     function apply(ctx) {
+       const slots = ctx.get('slots');
+       if (slots === undefined) return;
++
++      try {
++        slots.inject('conversation.composer.dock', () => slots.register(
++          { name: 'conversation.composer.dock', id: 'brain-map-probe', order: 999 },
++          (props) => React.createElement(Probe, Object.assign({}, props || {}, { __ctx: ctx })),
++        ));
++      } catch (e) { /* 忽略 */ }
+ 
+       slots.inject('conversation.input.right', () => slots.register(
+         { name: 'conversation.input.right', id: 'brain-map-open', order: 41, label: '记忆脑图' },
+         () => React.createElement(OpenButton, null),
